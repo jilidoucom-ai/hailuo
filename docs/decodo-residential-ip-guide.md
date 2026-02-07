@@ -81,63 +81,180 @@
 
 ### 方法二：在 v2node 服务器上直接修改 XRay 配置
 
-如果需要在节点服务器上直接配置，可以修改 XRay 核心的配置文件，添加出站代理链。
+如果需要在节点服务器上直接配置，可以通过 v2node 的 `custom_outbound.json` 和 `custom_route.json` 文件添加出站代理链，将所有出口流量经过 Decodo 住宅 IP。
 
-#### 完整配置示例（SOCKS5）
+> **适用场景**：面板不支持自定义出站配置，或需要更精细地控制节点层面的出站行为。
 
-在 XRay 配置文件中添加以下出站和路由规则：
+#### 第一步：SSH 登录到 v2node 服务器
 
-```json
-{
-  "outbounds": [
-    {
-      "tag": "proxy_via_decodo",
-      "protocol": "freedom",
-      "settings": {},
-      "proxySettings": {
-        "tag": "decodo_socks"
-      }
-    },
-    {
-      "tag": "decodo_socks",
-      "protocol": "socks",
-      "settings": {
-        "servers": [
-          {
-            "address": "gate.decodo.com",
-            "port": 7000,
-            "users": [
-              {
-                "user": "你的Decodo用户名",
-                "pass": "你的Decodo密码"
-              }
-            ]
-          }
-        ]
-      }
-    },
-    {
-      "tag": "direct",
-      "protocol": "freedom",
-      "settings": {}
-    }
-  ],
-  "routing": {
-    "rules": [
-      {
-        "type": "field",
-        "outboundTag": "proxy_via_decodo",
-        "network": "tcp,udp"
-      }
-    ]
-  }
-}
+```bash
+ssh your_user@你的服务器IP
 ```
 
-**说明**：
-- `decodo_socks`：定义到 Decodo SOCKS5 代理的出站连接
-- `proxy_via_decodo`：通过 `proxySettings` 将 freedom 出站链接到 Decodo 代理，实现代理链
-- `routing` 中的规则将所有流量路由到 `proxy_via_decodo`，从而经过 Decodo 住宅 IP 出站
+> **安全建议**：建议使用具有 sudo 权限的非 root 用户登录，避免直接以 root 身份操作。以下命令如需提升权限，请在前面加 `sudo`。
+
+#### 第二步：确认 v2node 配置目录
+
+v2node（基于 XrayR）的配置文件通常位于以下路径之一：
+
+```bash
+# 查看 v2node 服务文件，确认配置路径
+cat /etc/systemd/system/v2node.service
+
+# 常见配置目录
+ls /etc/v2node/
+# 或
+ls /etc/XrayR/
+```
+
+以下步骤假设配置目录为 `/etc/v2node/`，请根据实际情况替换。
+
+#### 第三步：创建自定义出站配置文件
+
+创建 `custom_outbound.json`，定义通过 Decodo SOCKS5 代理的出站链：
+
+```bash
+cat > /etc/v2node/custom_outbound.json << 'EOF'
+[
+  {
+    "tag": "decodo_socks",
+    "protocol": "socks",
+    "settings": {
+      "servers": [
+        {
+          "address": "gate.decodo.com",
+          "port": 7000,
+          "users": [
+            {
+              "user": "你的Decodo用户名",
+              "pass": "你的Decodo密码"
+            }
+          ]
+        }
+      ]
+    }
+  },
+  {
+    "tag": "proxy_via_decodo",
+    "protocol": "freedom",
+    "settings": {},
+    "proxySettings": {
+      "tag": "decodo_socks"
+    }
+  }
+]
+EOF
+```
+
+> **说明**：
+> - `decodo_socks`：定义到 Decodo SOCKS5 代理的出站连接
+> - `proxy_via_decodo`：通过 `proxySettings` 将 freedom 出站链接到 `decodo_socks`，实现代理链
+> - 请将 `你的Decodo用户名` 和 `你的Decodo密码` 替换为 Decodo 控制台中获取的实际凭据
+>
+> **安全提示**：配置文件中包含代理凭据，请设置正确的文件权限防止未授权访问：
+> ```bash
+> chmod 600 /etc/v2node/custom_outbound.json
+> ```
+
+#### 第四步：创建自定义路由配置文件
+
+创建 `custom_route.json`，将所有流量路由到 Decodo 代理出站：
+
+```bash
+cat > /etc/v2node/custom_route.json << 'EOF'
+{
+  "domainStrategy": "AsIs",
+  "rules": [
+    {
+      "type": "field",
+      "outboundTag": "proxy_via_decodo",
+      "network": "tcp,udp"
+    }
+  ]
+}
+EOF
+```
+
+> **说明**：此规则将所有 TCP 和 UDP 流量都通过 `proxy_via_decodo` 出站，从而经过 Decodo 住宅 IP。
+
+#### 第五步：修改 v2node 主配置文件
+
+编辑 `config.yml`，添加自定义出站和路由文件的路径引用：
+
+```bash
+vi /etc/v2node/config.yml
+```
+
+在配置文件中找到或添加以下字段：
+
+```yaml
+# 自定义出站配置文件路径
+OutboundConfigPath: /etc/v2node/custom_outbound.json
+# 自定义路由配置文件路径
+RouteConfigPath: /etc/v2node/custom_route.json
+```
+
+完整的 `config.yml` 示例（仅展示关键部分）：
+
+```yaml
+Log:
+  Level: warning
+
+OutboundConfigPath: /etc/v2node/custom_outbound.json
+RouteConfigPath: /etc/v2node/custom_route.json
+
+Nodes:
+  - PanelType: "NewV2board"
+    ApiConfig:
+      ApiHost: "https://你的面板地址"
+      ApiKey: "你的API密钥"
+      NodeID: 1
+      NodeType: V2ray
+      Timeout: 30
+    ControllerConfig:
+      ListenIP: 0.0.0.0
+      SendIP: 0.0.0.0
+      UpdatePeriodic: 60
+```
+
+#### 第六步：重启 v2node 服务
+
+```bash
+# 重启服务
+systemctl restart v2node
+
+# 检查服务状态，确认正常运行
+systemctl status v2node
+
+# 查看日志排查错误（如有）
+journalctl -u v2node --no-pager -n 50
+```
+
+#### 第七步：验证出口 IP
+
+在 v2node 服务器上测试出口 IP 是否已切换：
+
+```bash
+# 直接测试服务器出口 IP（应为服务器原始 IP）
+curl https://ip.decodo.com/json
+
+# 通过 Decodo 代理测试（应为住宅 IP）
+# 注意：命令行中的凭据可能出现在进程列表和 shell 历史中
+# 建议测试完成后运行 history -c 清除历史记录
+curl -x socks5h://你的Decodo用户名:你的Decodo密码@gate.decodo.com:7000 https://ip.decodo.com/json
+```
+
+然后通过客户端连接 v2node 节点，访问 [https://ip.decodo.com/json](https://ip.decodo.com/json)，确认显示的 IP 为 Decodo 住宅 IP 而非服务器 IP。
+
+#### 故障排查
+
+| 问题 | 排查方法 |
+|------|---------|
+| 服务启动失败 | 运行 `journalctl -u v2node --no-pager -n 100` 查看日志 |
+| JSON 格式错误 | 使用 `python3 -m json.tool /etc/v2node/custom_outbound.json` 验证 JSON |
+| 路径不正确 | 确认 `config.yml` 中的路径与实际文件路径一致 |
+| 出口 IP 未变化 | 检查路由规则是否生效，确认 `outboundTag` 名称与出站 `tag` 匹配 |
+| Decodo 认证失败 | 在 Decodo 控制台确认用户名密码，用 curl 单独测试代理连通性 |
 
 ## 高级用法：指定地区
 
